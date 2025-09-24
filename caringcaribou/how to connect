@@ -1,0 +1,7 @@
+cd caringcaribou
+python3 -m venv caribou-env
+source caribou-env/bin/activate
+
+sudo ip link set can0 up type can bitrate 500000
+
+now caringcaribou --help or other function
