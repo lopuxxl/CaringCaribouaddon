@@ -1026,16 +1026,19 @@ def __auto_wrapper(args):
                     print("Supported service 0x{0:02x}: {1}".format(service_id, service_name))
 
                 print("\n")
-
-                dump_dids(client_id, server_id, timeout, min_did, max_did, print_results)
                 
-                dump_memory_all_sessions(client_id, server_id, timeout,
-                                start_addr=MEM_START_ADDR,
-                                mem_length=MEM_LEN,
-                                mem_size=MEM_SIZE,
-                                address_byte_size=ADDR_BYTE_SIZE,
-                                memory_length_byte_size=MEM_LEN_BYTE_SIZE,
-                                print_results=print_results)
+                
+                if not args.faster:
+                    
+                    dump_dids(client_id, server_id, timeout, min_did, max_did, print_results)
+                
+                    dump_memory_all_sessions(client_id, server_id, timeout,
+                                    start_addr=MEM_START_ADDR,
+                                    mem_length=MEM_LEN,
+                                    mem_size=MEM_SIZE,
+                                    address_byte_size=ADDR_BYTE_SIZE,
+                                    memory_length_byte_size=MEM_LEN_BYTE_SIZE,
+                                    print_results=print_results)
                 
                 print("\nEnumerating Sessions and Supported Services:\n")
                 session_services = session_service_matrix(client_id, server_id, timeout, max_session=0xff)
@@ -1191,7 +1194,7 @@ def __auto_wrapper(args):
                             counter += 1
                         print(table_line_sec)
                 summary_counts[(client_id, server_id)] = {
-                    'services': num_services,
+                    'services': num_service,
                     }
                 print("\n\n==== Summary of Discovery ====\n")
                 for (client_id, server_id), counts in summary_counts.items():
@@ -1656,7 +1659,14 @@ def __parse_args(args):
                              type=parse_int_dec_or_hex,
                              default=DUMP_DID_MAX,
                              help="maximum device identifier (DID) to read (default: 0xFFFF)")
+                             
+    parser_auto.add_argument("-f", "--faster",
+                             action="store_true",
+                             help="disables dump did and dump memory functions in auto")                         
+                             
     parser_auto.set_defaults(func=__auto_wrapper)
+    
+    
 
     args = parser.parse_args(args)
     return args
