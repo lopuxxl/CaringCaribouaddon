@@ -859,8 +859,109 @@ def __dump_dids_wrapper(args):
               print_results)
 
 
+def session_service_matrix(arb_id_request, arb_id_response, timeout=0.2, max_session=0x20, print_results=True):
+    session_services = {}
+    for session_id in range(1, max_session + 1):            
+        response = extended_session(arb_id_request, arb_id_response, session_id)
+        if not response or not Iso14229_1.is_positive_response(response):
+            continue
+        
+        found_services = service_discovery(arb_id_request, arb_id_response, timeout, print_results=False)
+        session_services[session_id] = found_services
+        
+        if print_results:
+            print(f"  - Supported services in session 0x{session_id:02X}:")
+            for i, sid in enumerate(found_services, start=1):
+                name = UDS_SERVICE_NAMES.get(sid, "Unknown service")
+                print(f"    0x{sid:02X} : {name}")
+            print(f"  -> Found {len(found_services)} services in session 0x{session_id:02X}")
+
+                        
+def dump_memory(client_id, server_id, timeout,
+                start_addr=MEM_START_ADDR,
+                mem_length=MEM_LEN,
+                mem_size=MEM_SIZE,
+                address_byte_size=ADDR_BYTE_SIZE,
+                memory_length_byte_size=MEM_LEN_BYTE_SIZE,
+                print_results=True):
+    _max_memory_space = ( 2 ** (8 * address_byte_size) - 1)
+    
+    if isinstance(timeout, float) and timeout < 0.0:
+        raise ValueError(f"Timeout value ({timeout}) cannot be negative") 
+    if start_addr < 0:
+        raise ValueError(f"Start Address '{start_addr:x}' must be a positive integer")
+    if start_addr + mem_length > _max_memory_space:
+        raise OverflowError(f"Start Addr (0x{start_addr:x}) + mem_length (0x{mem_length:x})"
+                            f"exceeds max memory space (0x{_max_memory_space:x})")
+                            
+    responses = []
+    with IsoTp(arb_id_request=client_id,
+                arb_id_response=server_id) as tp:
+        tp.set_filter_single_arbitration_id(server_id)
+        with Iso14229_1(tp) as uds:
+            if timeout is not None:
+                uds.P3_CLIENT= timeout
+                 
+            if print_results:
+                print(f"Dumping Memory via 0x23 from 0x{start_addr:02x} "
+                        f"to 0x{start_addr+mem_length-1:02x}\n")
+                print("Address          Data (hex)")
+                
+            expected_response = uds.get_service_response_id(ServiceID.READ_MEMORY_BY_ADDRESS)
+            
+            for address in range(start_addr, start_addr + mem_length, mem_size):
+                fmt = (memory_length_byte_size << 4) + address_byte_size
+                response = uds.read_memory_by_address(
+                    memory_address=address,
+                    memory_size=mem_size,
+                    address_and_length_format=fmt)
+                
+                if response and Iso14229_1.is_positive_response(response) and response[0] == expected_response:
+                    reponses.append((address, response))
+                    if print_results and len(response) >= 2:
+                        print(f"0x{address:02x}  {list_to_hex_str(response[1:])}")
+                
+                elif response:
+                    if print_results:
+                        print(f"Failed 0x{mem_size:x} bytes @ 0x{address:02x}: {bytes(response).hex(' ')}")
+                    process_negative_response(response)
+                    
+            if print_results:
+                print("\nDone!")
+        
+                           
+def dump_memory_all_sessions(client_id, server_id, timeout,
+                start_addr=MEM_START_ADDR,
+                mem_length=MEM_LEN,
+                mem_size=MEM_SIZE,
+                address_byte_size=ADDR_BYTE_SIZE,
+                memory_length_byte_size=MEM_LEN_BYTE_SIZE,
+                max_session=0xff, print_results=True):
+    session_dumps = {}
+    
+    for sess_id in range(1, max_session + 1):
+        
+        response = extended_session(client_id, server_id, sess_id)
+        if not response or not Iso14229_1.is_positive_response(response):
+            continue
+            
+        if print_results:
+            print(f"   - Session 0x{sess_id:02x} entered, dumping memory...")
+            
+        
+        dump_memory(client_id, server_id, timeout,
+                            start_addr=MEM_START_ADDR,
+                            mem_length=MEM_LEN,
+                            mem_size=MEM_SIZE,
+                            address_byte_size=ADDR_BYTE_SIZE,
+                            memory_length_byte_size=MEM_LEN_BYTE_SIZE,
+                            print_results=print_results)
+                            
+
 def __auto_wrapper(args):
     """Wrapper used to initiate automated UDS scan"""
+    import time
+
     min_id = args.min
     max_id = args.max
     blacklist = args.blacklist
@@ -871,6 +972,8 @@ def __auto_wrapper(args):
     timeout = args.timeout
     min_did = args.min_did
     max_did = args.max_did
+    summary_counts = {}  # { (client_id, server_id) : { 'services': int, 'sessions': int, 'subservices': int } }
+    num_subservices = 0
 
     try:
         arb_id_pairs = uds_discovery(min_id, max_id, blacklist,
@@ -890,8 +993,7 @@ def __auto_wrapper(args):
             print("| CLIENT ID  | SERVER ID  |")
             print(table_line)
             for (client_id, server_id) in arb_id_pairs:
-                print("| 0x{0:08x} | 0x{1:08x} |"
-                      .format(client_id, server_id))
+                print("| 0x{0:08x} | 0x{1:08x} |".format(client_id, server_id))
             print(table_line)
             print("\n")
 
@@ -907,27 +1009,50 @@ def __auto_wrapper(args):
                 print(table_line)
                 print("| CLIENT ID  | SERVER ID  |")
                 print(table_line)
-                print("| 0x{0:08x} | 0x{1:08x} |"
-                      .format(client_id, server_id))
+                print("| 0x{0:08x} | 0x{1:08x} |".format(client_id, server_id))
                 print(table_line)
 
                 print("\nEnumerating Services:\n")
 
                 found_services = service_discovery(client_id, server_id, timeout)
-                found_subservices = []
 
+                found_subservices = []
+                
                 print("\nIdentified services:\n")
 
                 # Print available services result table
                 for service_id in found_services:
                     service_name = UDS_SERVICE_NAMES.get(service_id, "Unknown service")
-                    print("Supported service 0x{0:02x}: {1}"
-                          .format(service_id, service_name))
+                    print("Supported service 0x{0:02x}: {1}".format(service_id, service_name))
 
                 print("\n")
 
                 dump_dids(client_id, server_id, timeout, min_did, max_did, print_results)
+                
+                dump_memory_all_sessions(client_id, server_id, timeout,
+                                start_addr=MEM_START_ADDR,
+                                mem_length=MEM_LEN,
+                                mem_size=MEM_SIZE,
+                                address_byte_size=ADDR_BYTE_SIZE,
+                                memory_length_byte_size=MEM_LEN_BYTE_SIZE,
+                                print_results=print_results)
+                
+                print("\nEnumerating Sessions and Supported Services:\n")
+                session_services = session_service_matrix(client_id, server_id, timeout, max_session=0xff)
+                num_sessions = len(session_services) if session_services else 0
+                num_session_services = sum(len(s) for s in session_services.values()) if session_services else 0
 
+                if session_services:
+                    print("\nSession -> Supported Services Map:\n")
+                    for sess, services in session_services.items():
+                        print("Session 0x{0:02x}:".format(sess))
+                        for sid in services:
+                            name = UDS_SERVICE_NAMES.get(sid, "Unknown service")
+                            print("    0x{0:02x} : {1}".format(sid, name))
+                        print(f"\nfound amount of service {len(services)}")  
+                else:
+                    print("No additional sessions found.\n") 
+                           
                 if ServiceID.DIAGNOSTIC_SESSION_CONTROL in found_services:
 
                     print("\nEnumerating Diagnostic Session Control Service:\n")
@@ -973,7 +1098,9 @@ def __auto_wrapper(args):
                             nrc = subservice_status[found_subservices.index(subservice_id)]
                             nrc_name = get_negative_response_code_name(nrc)
                             print("\n0x{0:02x} : {1}".format(subservice_id, nrc_name), end=" ")
-
+                        print(f"\nfound amount of service {len(found_subservices)}")  
+                
+                
                 if ServiceID.ECU_RESET in found_services:
 
                     print("\n")
@@ -1005,6 +1132,8 @@ def __auto_wrapper(args):
                             if Iso14229_1.is_positive_response(response):
                                 found_subservices.append(i)
                                 subservice_status.append(0x00)
+                                num_subservices = len(found_subservices)
+
                             elif (response_id == Constants.NR_SI and response_service_id == 0x11 and
                                   status != NegativeResponseCodes.SUB_FUNCTION_NOT_SUPPORTED):
                                 # Any other response than "service not supported" counts
@@ -1043,6 +1172,8 @@ def __auto_wrapper(args):
                             elif Iso14229_1.is_positive_response(response):
                                 found_subdiag.append(subservice_id)
                                 found_subsec.append(level)
+                                num_subservices += 1
+
                     if len(found_subsec) == 0:
                         print("\nNo Security Access Sub-Services were discovered.\n")
                     else:
@@ -1056,13 +1187,20 @@ def __auto_wrapper(args):
                         for counter in range(len(found_subsec)):
                             diag = found_subdiag[counter]
                             sec = found_subsec[counter]
-                            print("|         0x{0:02x}         |         0x{1:02x}      |"
-                                  .format(diag, sec))
+                            print("|         0x{0:02x}         |         0x{1:02x}      |".format(diag, sec))
                             counter += 1
                         print(table_line_sec)
+                summary_counts[(client_id, server_id)] = {
+                    'services': num_services,
+                    }
+                print("\n\n==== Summary of Discovery ====\n")
+                for (client_id, server_id), counts in summary_counts.items():
+                    print(f"Client 0x{client_id:08X} / Server 0x{server_id:08X}:")
+                    print(f"  - Supported services: {counts['services']}")
 
     except ValueError as e:
         print("\nDiscovery failed: {0}".format(e), end=" ")
+
 
 
 def dump_dids(arb_id_request, arb_id_response, timeout,
