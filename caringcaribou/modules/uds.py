@@ -861,20 +861,52 @@ def __dump_dids_wrapper(args):
 
 def session_service_matrix(arb_id_request, arb_id_response, timeout=0.2, max_session=0x20, print_results=True):
     session_services = {}
-    for session_id in range(1, max_session + 1):            
+
+    for session_id in range(0, max_session + 1):
+        # probe line (updates in-place)
+        print("\r  - Probing session 0x{0:02X}:".format(session_id), end="", flush=True)
+
         response = extended_session(arb_id_request, arb_id_response, session_id)
         if not response or not Iso14229_1.is_positive_response(response):
             continue
-        
-        found_services = service_discovery(arb_id_request, arb_id_response, timeout, print_results=False)
-        session_services[session_id] = found_services
-        
+
+        # get services (leave service_discovery print behaviour as you had it)
+        found_services = service_discovery(arb_id_request, arb_id_response, timeout, print_results=True)
+
+        # normalize and deduplicate within this session (preserve first-seen order)
+        seen_local = set()
+        unique_session_services = []
+        for sid in found_services:
+            nsid = sid & 0xFF
+            if nsid not in seen_local:
+                seen_local.add(nsid)
+                unique_session_services.append(nsid)
+
+        session_services[session_id] = unique_session_services
+
         if print_results:
-            print(f"  - Supported services in session 0x{session_id:02X}:")
-            for i, sid in enumerate(found_services, start=1):
+            print()  # finish the probe line before printing session results
+            print(f" - Supported services in session 0x{session_id:02X}:")
+            for i, sid in enumerate(unique_session_services, start=1):
                 name = UDS_SERVICE_NAMES.get(sid, "Unknown service")
-                print(f"    0x{sid:02X} : {name}")
-            print(f"  -> Found {len(found_services)} services in session 0x{session_id:02X}")
+                print(f" 0x{sid:02X} : {name}")
+            print(f" -> Found {len(unique_session_services)} services in session 0x{session_id:02X}")
+
+    # choose best session id:
+    # default best_id is 3 unless some other id has more services than session 3
+    best_id = 3
+    best_count = len(session_services.get(3, []))
+    # find session with strictly greater count than session 3
+    for sid, services in session_services.items():
+        cnt = len(services)
+        if cnt > best_count:
+            best_count = cnt
+            best_id = sid
+
+    num_sessions = best_count  # number of services in the chosen session
+
+    return {'services': num_sessions, 'ses_id': best_id}
+
 
                         
 def dump_memory(client_id, server_id, timeout,
@@ -973,7 +1005,7 @@ def __auto_wrapper(args):
     min_did = args.min_did
     max_did = args.max_did
     summary_counts = {}  # { (client_id, server_id) : { 'services': int, 'sessions': int, 'subservices': int } }
-    num_subservices = 0
+    num_services = 0
 
     try:
         arb_id_pairs = uds_discovery(min_id, max_id, blacklist,
@@ -1041,165 +1073,159 @@ def __auto_wrapper(args):
                                     print_results=print_results)
                 
                 print("\nEnumerating Sessions and Supported Services:\n")
-                session_services = session_service_matrix(client_id, server_id, timeout, max_session=0xff)
-                num_sessions = len(session_services) if session_services else 0
-                num_session_services = sum(len(s) for s in session_services.values()) if session_services else 0
+                
 
-                if session_services:
-                    print("\nSession -> Supported Services Map:\n")
-                    for sess, services in session_services.items():
-                        print("Session 0x{0:02x}:".format(sess))
-                        for sid in services:
-                            name = UDS_SERVICE_NAMES.get(sid, "Unknown service")
-                            print("    0x{0:02x} : {1}".format(sid, name))
-                        print(f"\nfound amount of service {len(services)}")  
-                else:
-                    print("No additional sessions found.\n") 
+                res = session_service_matrix(client_id, server_id, timeout, max_session=0xff)
+                num_services = res['services']
+                best_session = res['ses_id']
                            
-                if ServiceID.DIAGNOSTIC_SESSION_CONTROL in found_services:
+                if not args.session:
+                           
+                    if ServiceID.DIAGNOSTIC_SESSION_CONTROL in found_services:
 
-                    print("\nEnumerating Diagnostic Session Control Service:\n")
+                        print("\nEnumerating Diagnostic Session Control Service:\n")
 
-                    found_subservices = []
-                    subservice_status = []
+                        found_subservices = []
+                        subservice_status = []
 
-                    for i in range(1, 256):
+                        for i in range(1, 256):
 
-                        extended_session(client_id, server_id, 1)
-
-                        response = extended_session(client_id, server_id, i)
-
-                        print("\rProbing diagnostic session control sub-service 0x{0:02x}".format(i), end="")
-
-                        if response is None:
-                            # No response received
-                            continue
-
-                        # Parse response
-                        if len(response) >= 3:
-                            response_id = response[0]
-                            response_service_id = response[1]
-                            status = response[2]
-                            if Iso14229_1.is_positive_response(response):
-                                found_subservices.append(i)
-                                subservice_status.append(0x00)
-                            elif (response_id == Constants.NR_SI and response_service_id == 0x10 and
-                                  status != NegativeResponseCodes.SUB_FUNCTION_NOT_SUPPORTED):
-                                # Any other response than "service not supported" counts
-                                found_subservices.append(i)
-                                subservice_status.append(response_service_id)
-
-                        time.sleep(timeout)
-
-                    # Print results
-                    if len(found_subservices) == 0:
-                        print("\nNo Diagnostic Session Control Sub-Services were discovered\n", end=" ")
-                    else:
-                        print("\n")
-                        print("\nDiscovered Diagnostic Session Control Sub-Services:\n", end=" ")
-                        for subservice_id in found_subservices:
-                            nrc = subservice_status[found_subservices.index(subservice_id)]
-                            nrc_name = get_negative_response_code_name(nrc)
-                            print("\n0x{0:02x} : {1}".format(subservice_id, nrc_name), end=" ")
-                        print(f"\nfound amount of service {len(found_subservices)}")  
-                
-                
-                if ServiceID.ECU_RESET in found_services:
-
-                    print("\n")
-                    print("\nEnumerating ECUReset Service:\n")
-
-                    found_subservices = []
-                    subservice_status = []
-
-                    for i in range(1, 5):
-
-                        extended_session(client_id, server_id, 3)
-
-                        response = raw_send(client_id, server_id, 17, i)
-
-                        print("\rProbing ECUReset sub-service 0x{0:02x}".format(i), end="")
-
-                        if response is None:
-                            # No response received
-                            continue
-
-                        # Parse response
-                        if len(response) >= 2:
-                            response_id = response[0]
-                            response_service_id = response[1]
-                            if len(response) >= 3:
-                                status = response[2]
-                            else:
-                                status = None
-                            if Iso14229_1.is_positive_response(response):
-                                found_subservices.append(i)
-                                subservice_status.append(0x00)
-                                num_subservices = len(found_subservices)
-
-                            elif (response_id == Constants.NR_SI and response_service_id == 0x11 and
-                                  status != NegativeResponseCodes.SUB_FUNCTION_NOT_SUPPORTED):
-                                # Any other response than "service not supported" counts
-                                found_subservices.append(i)
-                                subservice_status.append(response_service_id)
-
-                        time.sleep(timeout)
-
-                    # Print results
-                    if len(found_subservices) == 0:
-                        print("\nNo ECUReset Sub-Services were discovered.\n", end=" ")
-                    else:
-                        print("\n")
-                        print("\nDiscovered ECUReset Sub-Services:\n", end=" ")
-                        for subservice_id in found_subservices:
-                            nrc = subservice_status[found_subservices.index(subservice_id)]
-                            nrc_name = get_negative_response_code_name(nrc)
-                            print("\n0x{0:02x} : {1}".format(subservice_id, nrc_name), end=" ")
-
-                if ServiceID.SECURITY_ACCESS in found_services:
-
-                    found_subdiag = []
-                    found_subsec = []
-                    print("\n")
-                    for subservice_id in found_subservices:
-                        for level in range(1, 256):
-                            print(
-                                "\rProbing security access sub-service "
-                                "0x{0:02x} in diagnostic session 0x{1:02x}.".format(level, subservice_id), end=" ")
                             extended_session(client_id, server_id, 1)
-                            extended_session(client_id, server_id, subservice_id)
-                            response = raw_send(client_id, server_id, 39, level)
+
+                            response = extended_session(client_id, server_id, i)
+
+                            print("\rProbing diagnostic session control sub-service 0x{0:02x}".format(i), end="")
 
                             if response is None:
+                                # No response received
                                 continue
-                            elif Iso14229_1.is_positive_response(response):
-                                found_subdiag.append(subservice_id)
-                                found_subsec.append(level)
-                                num_subservices += 1
 
-                    if len(found_subsec) == 0:
-                        print("\nNo Security Access Sub-Services were discovered.\n")
-                    else:
+                            # Parse response
+                            if len(response) >= 3:
+                                response_id = response[0]
+                                response_service_id = response[1]
+                                status = response[2]
+                                if Iso14229_1.is_positive_response(response):
+                                    found_subservices.append(i)
+                                    subservice_status.append(0x00)
+                                elif (response_id == Constants.NR_SI and response_service_id == 0x10 and
+                                    status != NegativeResponseCodes.SUB_FUNCTION_NOT_SUPPORTED):
+                                    # Any other response than "service not supported" counts
+                                    found_subservices.append(i)
+                                    subservice_status.append(response_service_id)
+
+                            time.sleep(timeout)
+
+                        # Print results
+                        if len(found_subservices) == 0:
+                            print("\nNo Diagnostic Session Control Sub-Services were discovered\n", end=" ")
+                        else:
+                            print("\n")
+                            print("\nDiscovered Diagnostic Session Control Sub-Services:\n", end=" ")
+                            for subservice_id in found_subservices:
+                                nrc = subservice_status[found_subservices.index(subservice_id)]
+                                nrc_name = get_negative_response_code_name(nrc)
+                                print("\n0x{0:02x} : {1}".format(subservice_id, nrc_name), end=" ")
+                            print(f"\nfound amount of service {len(found_subservices)}")  
+                
+                
+                    if ServiceID.ECU_RESET in found_services:
+
                         print("\n")
-                        print("\nDiscovered Security Access Sub Services:\n")
+                        print("\nEnumerating ECUReset Service:\n")
+    
+                        found_subservices = []
+                        subservice_status = []
+
+                        for i in range(1, 5):
+
+                            extended_session(client_id, server_id, 3)
+
+                            response = raw_send(client_id, server_id, 17, i)
+
+                            print("\rProbing ECUReset sub-service 0x{0:02x}".format(i), end="")
+
+                            if response is None:
+                                # No response received
+                                continue
+
+                            # Parse response
+                            if len(response) >= 2:
+                                response_id = response[0]
+                                response_service_id = response[1]
+                                if len(response) >= 3:
+                                    status = response[2]
+                                else:
+                                    status = None
+                                if Iso14229_1.is_positive_response(response):
+                                    found_subservices.append(i)
+                                    subservice_status.append(0x00)
+
+                                elif (response_id == Constants.NR_SI and response_service_id == 0x11 and
+                                    status != NegativeResponseCodes.SUB_FUNCTION_NOT_SUPPORTED):
+                                    # Any other response than "service not supported" counts
+                                    found_subservices.append(i)
+                                    subservice_status.append(response_service_id)
+
+                            time.sleep(timeout)
+
+                        # Print results
+                        if len(found_subservices) == 0:
+                            print("\nNo ECUReset Sub-Services were discovered.\n", end=" ")
+                        else:
+                            print("\n")
+                            print("\nDiscovered ECUReset Sub-Services:\n", end=" ")
+                            for subservice_id in found_subservices:
+                                nrc = subservice_status[found_subservices.index(subservice_id)]
+                                nrc_name = get_negative_response_code_name(nrc)
+                                print("\n0x{0:02x} : {1}".format(subservice_id, nrc_name), end=" ")
+
+                    if ServiceID.SECURITY_ACCESS in found_services:
+
+                        found_subdiag = []
+                        found_subsec = []
                         print("\n")
-                        table_line_sec = "+----------------------+-------------------+"
-                        print(table_line_sec)
-                        print("|  Diagnostic Session  |  Security Access  |")
-                        print(table_line_sec)
-                        for counter in range(len(found_subsec)):
-                            diag = found_subdiag[counter]
-                            sec = found_subsec[counter]
-                            print("|         0x{0:02x}         |         0x{1:02x}      |".format(diag, sec))
-                            counter += 1
-                        print(table_line_sec)
+                        for subservice_id in found_subservices:
+                            for level in range(1, 256):
+                                print(
+                                    "\rProbing security access sub-service "
+                                    "0x{0:02x} in diagnostic session 0x{1:02x}.".format(level, subservice_id), end=" ")
+                                extended_session(client_id, server_id, 1)
+                                extended_session(client_id, server_id, subservice_id)
+                                response = raw_send(client_id, server_id, 39, level)
+
+                                if response is None:
+                                    continue
+                                elif Iso14229_1.is_positive_response(response):
+                                    found_subdiag.append(subservice_id)
+                                    found_subsec.append(level)
+
+                        if len(found_subsec) == 0:
+                            print("\nNo Security Access Sub-Services were discovered.\n")
+                        else:
+                            print("\n")
+                            print("\nDiscovered Security Access Sub Services:\n")
+                            print("\n")
+                            table_line_sec = "+----------------------+-------------------+"
+                            print(table_line_sec)
+                            print("|  Diagnostic Session  |  Security Access  |")
+                            print(table_line_sec)
+                            for counter in range(len(found_subsec)):
+                                diag = found_subdiag[counter]
+                                sec = found_subsec[counter]
+                                print("|         0x{0:02x}         |         0x{1:02x}      |".format(diag, sec))
+                                counter += 1
+                            print(table_line_sec)
+                            
                 summary_counts[(client_id, server_id)] = {
-                    'services': num_service,
+                    'services': num_services,
+                    'session_id' : best_session
                     }
                 print("\n\n==== Summary of Discovery ====\n")
                 for (client_id, server_id), counts in summary_counts.items():
                     print(f"Client 0x{client_id:08X} / Server 0x{server_id:08X}:")
-                    print(f"  - Supported services: {counts['services']}")
+                    print(f"  - Supported services: {num_services}")
+                    print(f"  - Best session: {best_session}")
 
     except ValueError as e:
         print("\nDiscovery failed: {0}".format(e), end=" ")
@@ -1662,7 +1688,11 @@ def __parse_args(args):
                              
     parser_auto.add_argument("-f", "--faster",
                              action="store_true",
-                             help="disables dump did and dump memory functions in auto")                         
+                             help="disables dump did and dump memory functions in auto")   
+    
+    parser_auto.add_argument("-s", "--session",
+                             action="store_true",
+                             help=" only checks all sessions and finds best for each adress ")                                                  
                              
     parser_auto.set_defaults(func=__auto_wrapper)
     
