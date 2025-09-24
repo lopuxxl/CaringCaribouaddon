@@ -1004,8 +1004,8 @@ def __auto_wrapper(args):
     timeout = args.timeout
     min_did = args.min_did
     max_did = args.max_did
-    summary_counts = {}  # { (client_id, server_id) : { 'services': int, 'sessions': int, 'subservices': int } }
     num_services = 0
+    summary_counts = {} 
 
     try:
         arb_id_pairs = uds_discovery(min_id, max_id, blacklist,
@@ -1217,15 +1217,15 @@ def __auto_wrapper(args):
                                 counter += 1
                             print(table_line_sec)
                             
-                summary_counts[(client_id, server_id)] = {
-                    'services': num_services,
-                    'session_id' : best_session
-                    }
-                print("\n\n==== Summary of Discovery ====\n")
-                for (client_id, server_id), counts in summary_counts.items():
-                    print(f"Client 0x{client_id:08X} / Server 0x{server_id:08X}:")
-                    print(f"  - Supported services: {num_services}")
-                    print(f"  - Best session: {best_session}")
+                summary_counts[(client_id, server_id)] = {'services': res['services'], 'session_id': res['ses_id']}
+
+                # now print the full summary so far (use the stored values from summary_counts)
+                print("\n\n==== Summary of Discovery (so far) ====\n")
+                for (cid, sid), counts in summary_counts.items():
+                    print(f"Client 0x{cid:08X} / Server 0x{sid:08X}:")
+                    # use counts[...] — NOT some loop variable that changes each iteration
+                    print(f"  - Supported services: {counts['services']}")
+                    print(f"  - Best session: 0x{counts['session_id']:02X}")
 
     except ValueError as e:
         print("\nDiscovery failed: {0}".format(e), end=" ")
